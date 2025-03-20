@@ -97,10 +97,20 @@ impl<T: GhostdagStoreReader, S: RelationsStoreReader, U: ReachabilityService, V:
         ))
     }
 
+    /// Fails because block neither exist in Ghostdag nor Ghostdag Compact.
+    /// A block may not be included if it does not fit within the defined block window.
+    /// Since the block doesn't exist, we will assume blue work
+    /// to be 0 and return it as fallback.
     pub fn find_selected_parent(&self, parents: impl IntoIterator<Item = Hash>) -> Hash {
         parents
             .into_iter()
-            .map(|parent| SortableBlock { hash: parent, blue_work: self.ghostdag_store.get_blue_work(parent).unwrap() })
+            .map(|parent| {
+                let blue_work = self.ghostdag_store.get_blue_work(parent).unwrap_or_else(|_| {
+                    log::warn!("Using fallback blue work value for parent {}", parent);
+                    kaspa_math::Uint192([0, 0, 0])
+                });
+                SortableBlock { hash: parent, blue_work }
+            })
             .max()
             .unwrap()
             .hash
