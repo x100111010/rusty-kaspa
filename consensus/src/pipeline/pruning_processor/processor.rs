@@ -1,5 +1,6 @@
 //! TODO: module comment about locking safety and consistency of various pruning stores
 
+use crate::processes::utils::CoinFlip;
 use crate::{
     consensus::{
         services::{ConsensusServices, DbParentsManager, DbPruningPointManager},
@@ -170,6 +171,36 @@ impl PruningProcessor {
     fn advance_pruning_point_and_candidate_if_possible(&self, sink_ghostdag_data: CompactGhostdagData) {
         let pruning_point_read = self.pruning_point_store.upgradable_read();
         let current_pruning_info = pruning_point_read.get().unwrap();
+
+        if CoinFlip::new(0.001).flip() {
+            // only log occasionally (0.1% of)
+            let virtual_blue_score = sink_ghostdag_data.blue_score;
+            let selected_parent_daa_score = self.headers_store.get_daa_score(sink_ghostdag_data.selected_parent).unwrap();
+            let finality_depth = self.config.finality_depth().get(selected_parent_daa_score);
+            let pruning_depth = self.config.pruning_depth().get(selected_parent_daa_score);
+            let target_time_per_block_ms = self.config.target_time_per_block().get(selected_parent_daa_score);
+
+            let blocks_until_pruning = (finality_depth - (virtual_blue_score - pruning_depth) % finality_depth) % finality_depth;
+            let time_until_next_pruning_sec = blocks_until_pruning as f64 * target_time_per_block_ms as f64 / 1000.0;
+
+            let time_display = if time_until_next_pruning_sec > 3600.0 {
+                format!("{:.2} h", time_until_next_pruning_sec / 3600.0)
+            } else {
+                format!("{:.2} s", time_until_next_pruning_sec)
+            };
+
+            info!(
+                "Periodic PP advancing estimate: {} blocks (~{}), formula: (F({}) - (V({}) - P({})) % F) = {}",
+                blocks_until_pruning,
+                time_display,
+                //time_until_next_pruning_sec,
+                finality_depth,
+                virtual_blue_score,
+                pruning_depth,
+                blocks_until_pruning
+            );
+        }
+
         let (new_pruning_points, new_candidate) = self.pruning_point_manager.next_pruning_points(
             sink_ghostdag_data,
             current_pruning_info.candidate,
@@ -177,6 +208,22 @@ impl PruningProcessor {
         );
 
         if let Some(new_pruning_point) = new_pruning_points.last().copied() {
+            let old_pruning_point = current_pruning_info.pruning_point;
+            let old_blue_score = self.headers_store.get_blue_score(old_pruning_point).unwrap();
+            let new_blue_score = self.headers_store.get_blue_score(new_pruning_point).unwrap();
+            let selected_parent_daa_score = self.headers_store.get_daa_score(sink_ghostdag_data.selected_parent).unwrap();
+            let finality_depth = self.config.finality_depth().get(selected_parent_daa_score);
+            info!(
+                "PP advancing: old={} (blue_score={}), new={} (blue_score={}), finality_score old={}, new={}, finality_depth={}",
+                old_pruning_point,
+                old_blue_score,
+                new_pruning_point,
+                new_blue_score,
+                old_blue_score / finality_depth,
+                new_blue_score / finality_depth,
+                finality_depth
+            );
+
             let retention_period_root = pruning_point_read.retention_period_root().unwrap();
 
             // Update past pruning points and pruning point stores
